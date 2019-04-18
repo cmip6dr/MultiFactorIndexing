@@ -25,8 +25,11 @@ class Mf(collections.defaultdict):
     """The class is initialised with a rank (positive integer) and base class (python class object);
     """
     
+    self.BaseClass = BaseClass 
+    self.name = name
     self.rank = rank
     self.root = root
+    self.tkeys = TupleKeys(self)
     assert type(rank) == type(1),'rank (first argument) must be an integer: %s' % rank
     assert rank > 0,'rank (first argument) must be positive: %s' % rank
 
@@ -55,7 +58,7 @@ class Mf(collections.defaultdict):
     if rank == 1:
       super( Mf, self).__init__(BaseClass)
     elif rank > 1:
-      super( Mf, self).__init__(lambda: Mf(rank-1, BaseClass,root=False ) )
+      super( Mf, self).__init__(lambda: Mf(rank-1, BaseClass,root=False,aggregator=aggregator, extender=extender ) )
 
 
     self.extender = extender
@@ -72,7 +75,7 @@ class Mf(collections.defaultdict):
       elif hasattr( BaseClass, '__add__' ) and callable( BaseClass.__add__ ):
         self.extender = '__add__'
     else:
-      assert hasattr( BaseClass, extender ) and callable ( gettattr( BaseClass, extender ) ), 'The extender must be a callable method of BaseClass'
+      assert hasattr( BaseClass, extender ) and callable ( getattr( BaseClass, extender ) ), 'The extender must be a callable method of BaseClass'
 
     assert self.extender != None, 'Extender not found. If baseClass does not have a callable attribute add, append or __add__, the extender must be explicitly specified as an argument'
 
@@ -87,25 +90,50 @@ class Mf(collections.defaultdict):
       elif hasattr( BaseClass, '__add__' ) and callable( BaseClass.__add__ ):
         self.aggregator = '__add__'
     else:
-      assert hasattr( BaseClass, aggregator ) and callable ( gettattr( BaseClass, aggregator ) ), 'The aggregator must be a callable method of BaseClass'
+      assert hasattr( BaseClass, aggregator ) and callable ( getattr( BaseClass, aggregator ) ), 'The aggregator must be a callable method of BaseClass'
 
 
-  def all(self):
+  def squash(self,lev,name=None):
+    if name == None:
+       name = '%s [minus %s]' % (self.name,lev)
+    new = Mf( self.rank-1,self.BaseClass,name=name,aggregator=self.aggregator,extender=self.extender)
+    for t in self.tkeys:
+      t2 = list( t[:] )
+      t2.pop(lev-1)
+      new.Append( t2, self.Tget( t ) )
+
+    return new
+      
+  def levelKeys(self,lev):
+    ss = set()
+    if lev == 1:
+      for k in self.keys():
+        ss = ss.union( set( self[k].keys() ) )
+    else:
+      for k in self.keys():
+        ss = ss.union( set( self[k].levelKeys(lev-1) ) )
+    return ss
+      
+  def all(self,filter=None):
 
     assert self.aggregator != None
     oo = None
     if self.rank == 1:
       for k in self.keys():
-        if oo == None:
-          oo = self[k]
-        else:
-          oo = getattr( oo, self.aggregator )(self[k] )
+        if filter == None or (self.rank not in filter) or (k in filter[self.rank]):
+          if oo == None:
+            oo = self[k]
+          else:
+            oo = getattr( oo, self.aggregator )(self[k] )
     else:
       for k in self.keys():
-        if oo == None:
-          oo = self[k].all()
-        else:
-          oo = getattr( oo, self.aggregator )(self[k].all() )
+        if filter == None or (self.rank not in filter) or (k in filter[self.rank]):
+          ook = self[k].all( filter=filter )
+          if ook != None:
+            if oo == None:
+              oo = ook
+            else:
+              oo = getattr( oo, self.aggregator )( ook )
     return oo
 
   def freeze(self,recursive=False):
@@ -113,6 +141,24 @@ class Mf(collections.defaultdict):
     if recursive and self.rank > 1:
       for k in self.keys():
         self[k].freeze(recursive=True)
+
+  def ReMap( self, levmap):
+    assert len(levmap) == self.rank
+    assert len(levmap) == len(set(levmap))
+    assert min(levmap) == 0 and max(levmap) == self.rank-1
+
+
+## to do reorder in place:
+## need to ensure that tkey does not start returning new keys ... should be OK since copy of keys is taken at start of iteration.
+## need to ensure that new keys dont overwrite old ... can use a prefix, kk --> (unique,kk), where "unique" is not in set of kk[0] values.
+##
+    ##for t in self.tkey;
+
+  def Tget( self, keys):
+    if self.rank == 1:
+      return self[keys[0]]
+    else:
+      return self[keys.pop(0)].Tget( keys )
 
   def Append( self, keys, item ):
     """At item to the multi-index, indexed on a tuple of keys.
@@ -156,3 +202,59 @@ class Mf(collections.defaultdict):
               new.append( keys[m[0]][m[1]] )
           keys = new
       self.Append( keys, item )
+
+class TupleKeys(object):
+  """The TupleKeys class provides an iterator over the multi-level structure of the 
+     Mf class.
+     --------------------
+     Usage
+     -----
+     tk = TupleKeys(mf) # mf an instance of Mf
+     for t in tk:
+       print (t)
+
+     The class is instantiated in Mf, as mf.tkey.
+  """
+  def __init__(self,mf):
+    self.mf = mf
+    self.rank = mf.rank
+
+  def __iter__(self):
+    self.keys = list(self.mf.keys())
+    self.mf.__iter__()
+    self.a = 0
+    if self.rank > 1:
+       self.mf[self.keys[self.a]].tkeys.__iter__()
+    return self
+
+  def __len__(self):
+    if self.rank == 1:
+      return len(self.mf.keys())
+    else:
+      l = 0
+      for k in self.mf.keys():
+        l += self.mf[k].tkeys.__len__()
+      return l
+
+  def __next__(self):
+    if self.a < len(self.keys):
+      x = self.keys[self.a]
+      if self.rank == 1:
+        self.a += 1
+        return x
+      else:
+        try:
+          x1 = self.mf[x].tkeys.__next__()
+        except StopIteration:
+          self.a += 1
+          if self.a >= len(self.keys):
+            raise
+          x = self.keys[self.a]
+          self.mf[x].tkeys.__iter__()
+          x1 = self.mf[x].tkeys.__next__()
+        if self.rank == 2:
+          return [x,x1]
+        else:
+          return [x,] + x1
+    else:
+      raise StopIteration
